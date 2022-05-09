@@ -1,0 +1,569 @@
+PEP: 9999
+Title: JSON-based Simple API for Python Package Repositories Version 1.1
+Author: Dominic Davis-Foster <dominic@davis-foster.co.uk>
+Status: Draft
+Type: Standards Track
+Content-Type: text/x-rst
+PEP-Delegate: 
+Discussions-To: 
+Created: 09-May-2022
+Post-History: 
+
+
+Abstract
+========
+
+The "Simple Repository API" that was defined in :pep:`503` (and was in use much
+longer than that) has served us reasonably well for a very long time. However,
+the reliance on using HTML as the data exchange mechanism has several
+shortcomings.
+
+There are two major issues with an HTML-based API:
+
+- While HTML5 is a standard, it's an incredibly complex standard and ensuring
+  completely correct parsing of it involves complex logic that does not
+  currently exist within the Python standard library (nor the standard library
+  of many other languages).
+
+  This means that to actually accept everything that is technically valid, tools
+  have to pull in large dependencies or they have to rely on the standard library's
+  ``html.parser`` library, which is lighter weight but potentially doesn't
+  fully support HTML5.
+
+- HTML5 is primarily designed as a markup language to present documents for human
+  consumption. Our use of it is driven largely for historical reasons and accidental
+  reasons, and it's unlikely anyone would design an API that relied on it if
+  they were starting from scratch.
+
+  The primary issue with using a markup format designed for human consumption
+  is that there's not a great way to actually encode data within HTML. We've
+  gotten around this by limiting the data we put in this API and being creative
+  with how we can cram data into the API (for instance, hashes are embedded as
+  URL fragments, adding the ``data-yanked`` attribute in :pep:`592`).
+
+:pep:`503` was largely an attempt to standardize what was already in use, so it
+did not propose any large changes to the API.
+
+In the intervening years, we've regularly talked about an "API V2" that would
+re-envision the entire API of PyPI. However, due to limited time constraints,
+that effort has not gained much if any traction beyond people thinking that it
+would be nice to do it.
+
+This PEP attempts to take a different route. It doesn't fundamentally change
+the overall API structure, but instead specifies a new serialization of the
+existing data contained in existing :pep:`503` responses in a format that is
+easier for software to parse rather than using a human centric document format.
+
+
+Goals
+=====
+
+- **Enable zero configuration discovery.** Clients of the simple API **MUST** be
+  able to gracefully determine whether a target repository supports this PEP
+  without relying on any form of out of band communication (configuration, prior
+  knowledge, etc). Individual clients **MAY** choose to require configuration
+  to enable the use of this API, however.
+- **Enable clients to drop support for "legacy" HTML parsing.** While it is expected
+  that most clients will keep supporting HTML-only repositories for a while, if not
+  forever, it should be possible for a client to choose to support only the new
+  API formats and no longer invoke an HTML parser.
+- **Enable repositories to drop support for "legacy" HTML formats.** Similar to
+  clients, it is expected that most repositories will continue to support HTML
+  responses for a long time, or forever. It should be possible for a repository to
+  choose to only support the new formats.
+- **Maintain full support for existing HTML-only clients.** We **MUST** not break
+  existing clients that are accessing the API as a strictly :pep:`503` API. The only
+  exception to this, is if the repository itself has chosen to no longer support
+  the HTML format.
+- **Minimal additional HTTP requests.** Using this API **MUST** not drastically
+  increase the amount of HTTP requests an installer must do in order to function.
+  Ideally it will require 0 additional requests, but if needed it may require one
+  or two additional requests (total, not per dependency).
+- **Minimal additional unique reponses.** Due to the nature of how large
+  repositories like PyPI cache responses, this PEP should not introduce a
+  significantly or combinatorially large number of additional unique responses
+  that the repository may produce.
+- **Supports TUF.** This PEP **MUST** be able to function within the bounds of
+  what TUF can support (:pep:`458`), and must be able to be secured using it.
+- **Require only the standard library, or small external dependencies for clients.**
+  Parsing an API response should ideally require nothing but the standard
+  library, however it would be acceptable to require a small, pure Python
+  dependency.
+
+
+Specification
+=============
+
+To enable parsing responses with only the standard library, this PEP specifies that
+all responses (besides the files themselves, and the HTML responses from
+:pep:`503`) should be serialized using `JSON <https://www.json.org/>`_.
+
+The different versions of the API (v1.0 :pep:`503`, v1.1 this PEP, v2 in the future)
+will be exposed at separate endpoints corresponding to the API version.
+A special endpoint can be queried to  discover the supported API versions
+and their respective URLs.
+
+
+Versioning
+----------
+
+Versioning will adhere to :pep:`629` format (``Major.Minor``), which has defined the
+existing HTML responses to be ``1.0``. Since this PEP does not introduce new features
+into the API, rather it describes a different serialization format for the existing
+features, this PEP does not change the existing ``1.0`` version, and instead just
+describes how to serialize that into JSON.
+
+Simililary to :pep:`629`, the major version number **MUST** be incremented if any
+changes to the new format would result in no longer being able to expect existing
+clients to meaningfully understand the format.
+
+Likewise, incrementing the minor version **MUST** be incremented if features are
+added or removed from the format, but existing clients would be expected to continue
+to meaningfully understand the format.
+
+Changes that would not result in existing clients being unable to meaningfully
+understand the format and which do not represent features being added or removed
+may occur without changing the version number.
+
+This is intentionally vague, as this PEP believes it is best left up to future PEPs
+that make any changes to the API to investigate and decide whether or not that
+change should increment the major or minor version.
+
+Future versions of the API may add things that can only be represented in a subset
+of the available serializations of that version. All serializations version numbers
+**SHOULD** be kept in sync, but the specifics of how a feature serializes into each
+format may differ, including whether or not that feature is present at all.
+
+It is the intent of this PEP that the API should be thought of as URL endpoints that
+return data, whose interpretation is defined by the version of that data, and then
+serialized into the target serialization format.
+
+
+JSON Serialization
+------------------
+
+The URL structure from :pep:`503` still applies, as this PEP only adds an additional
+serialization format for the already existing API.
+
+The following constraints apply to all JSON serialized responses described in this
+PEP:
+
+* All JSON responses will *always* be a JSON object rather than an array or other
+  type.
+
+* While JSON doesn't natively support an URL type, any value that represents an
+  URL in this API may be either absolute or relative as long as they point to
+  the correct location. If relative, they are relative to the current URL as if
+  it were HTML.
+
+* Additional keys may be added to any dictionary objects in the API responses
+  and clients **MUST** ignore keys that they don't understand.
+
+* All JSON responses will have a ``meta`` key, which contains information related to
+  the response itself, rather than the content of the response.
+
+* All JSON responses will have a ``meta.api-version`` key, which will be a string that
+  contains the :pep:`629` ``Major.Minor`` version number, with the same fail/warn
+  semantics as in :pep:`629`.
+
+* All requirements of :pep:`503` that are not HTML specific still apply.
+
+
+
+Autodiscovery
+~~~~~~~~~~~~~
+
+The root URL (``/`` in these examples) will be a JSON encoded dictionary
+used by clients to determine the supported API versions, and the URLs to access them with.
+The keys of the dictionary will be the major API versions (e.g. ``1.1``),
+and the values give "*versioned base URL*" which should be used to interact with that version of the API.
+
+For example:
+
+.. code-block:: json
+
+    {
+      "1.0": "https://pypi.org/simple/",
+      "1.1": "/api/1.1/",
+      "2.0": "https://pypi.org/api/2.0/",
+      }
+    }
+
+The URLs may be either absolute or relative with an absolute path.
+The versioned base URL for API version 1.0 will function exactly as it does currently,
+preserving compatibility for older clients.
+The versioned base URL for version 1.1 functions as described below.
+
+The root URL will be given by the user to their client (e.g. pip) to tell the
+client which repository they wish to use. For pip this is currently achieved
+with the ``--index-url=<url>`` option, e.g. 
+``pip install urllib3  --index-url=https://repo-helper.uk/simple503/``.
+With this PEP the usage might be
+``pip install urllib3 --index-discover=https://repo-helper.uk/simple503/_discovery``,
+where ``https://repo-helper.uk/simple503/_discovery`` is the root URL.
+pip would then determine the URL to make further requests to from the response.
+
+
+Project List
+~~~~~~~~~~~~
+
+The versioned base URL (``/api/1.1/`` in these examples) will be a JSON encoded
+dictionary which has a single key, ``projects``, which is itself a dictionary  where each
+key is a string of the normalized project name, and the value is a dictionary with a
+single key, ``url``, which represents the URL that the project can be fetched from. As
+an example:
+
+.. code-block:: json
+
+    {
+      "meta": {
+        "api-version": "1.1"
+      },
+      "projects": {
+        "frob": {"url": "/api/1.1/frob/"},
+        "spamspamspam": {"url": "/api/1.1/spamspamspam/"}
+      }
+    }
+
+
+Project Detail
+~~~~~~~~~~~~~~
+
+The format of this URL is ``/api/1.1/<project>/`` where the ``<project>`` is replaced by the
+:pep:`503`-canonicalized name for that project, so a project named "Holy_Grail" would
+have a URL like ``/api/1.1/holy-grail/``.
+
+This URL must respond with a JSON encoded dictionary that has two keys, ``name``, which
+represents the normalized name of the project and ``files``. The ``files`` key is a
+list of dictionaries, each one representing an individual file.
+
+Each individual file dictionary has the following keys:
+
+- ``filename``: The filename that is being represented.
+- ``url``: The URL that the file can be fetched from.
+- ``hashes``: A dictionary mapping a hash name to a hex encoded digest of the file.
+  Multiple hashes can be included, and it is up to the client to decide what to do
+  with multiple hashes (it may validate all of them or a subset of them, or nothing
+  at all). These hash names **SHOULD** always be normalized to be lowercase.
+
+  The ``hashes`` dictionary **MUST** be present, even if no hashes are available
+  for the file, however it is **HIGHLY** recommended that at least one secure,
+  guaranteed to be available hash is always included.
+
+  By default, any hash algorithm available via `hashlib
+  <https://docs.python.org/3/library/hashlib.html>`_ (specifically any that can
+  be passed to ``hashlib.new()`` and do not require additional parameters) can
+  be used as a key for the hashes dictionary. At least one secure algorithm from
+  ``hashlib.algorithms_guaranteed`` **SHOULD** always be included. At the time
+  of this PEP, ``sha256`` specifically is recommended.
+- ``requires-python``: An **optional** key that exposes the *Requires-Python*
+  metadata field, specified in :pep:`345`. Where this is present, installer tools
+  **SHOULD** ignore the download when installing to a Python version that
+  doesn't satisfy the requirement.
+
+  Unlike ``data-requires-python`` in :pep:`503`, the ``requires-python`` key does not
+  require any special escaping other than anything JSON does naturally.
+- ``dist-info-metadata``: An **optional** key that indicates
+  that metadata for this file is available, via the same location as specified in
+  :pep:`658` (``{file_url}.metadata``). Where this is present, it **MUST** be
+  boolean to indicate if the file has an associated metadata file, or a dictionary
+  mapping hash names to a hex encoded digest of the metadata's hash.
+
+  When this is a dictionary of hashes, then all the same requirements and
+  recommendations as the ``hashes`` key hold true for this key as well.
+
+  If this key is missing then the metadata file may or may not exist. If the key
+  value is truthy, then the metadata file is present, and if it is falsey then it
+  is not.
+
+  It is recommended that servers make the hashes of the metadata file available if
+  possible.
+- ``gpg-sig``: An **optional** key that acts a boolean to indicate if the file has
+  an associated GPG signature or not. If this key does not exist, then the signature
+  may or may not exist.
+- ``yanked``: An **optional** key which may be a boolean to indicate if the file
+  has been yanked, or a non empty, but otherwise arbitrary, string to indicate that
+  a file has been yanked with a specific reason. If the ``yanked`` key is present
+  and is a truthy value, then it **SHOULD** be interpreted as indicating that the
+  file pointed to by the ``url`` field has been "Yanked" as per :pep:`592`.
+
+As an example:
+
+.. code-block:: json
+
+    {
+      "meta": {
+        "api-version": "1.1"
+      },
+      "name": "holygrail",
+      "files": [
+        {
+          "filename": "holygrail-1.0.tar.gz",
+          "url": "https://example.com/files/holygrail-1.0.tar.gz",
+          "hashes": {"sha256": "...", "blake2b": "..."},
+          "requires-python": ">=3.7",
+          "yanked": "Had a vulnerability"
+        },
+        {
+          "filename": "holygrail-1.0-py3-none-any.whl",
+          "url": "https://example.com/files/holygrail-1.0-py3-none-any.whl",
+          "hashes": {"sha256": "...", "blake2b": "..."},
+          "requires-python": ">=3.7",
+          "dist-info-metadata": true
+        }
+      ]
+    }
+
+
+Content-Types
+-------------
+
+For the legacy :pep:`503` API (the 1.0 versioned base URL), 
+responses should have the ``Content-Type`` header set to ``text/html``.
+
+For the new version 1.1 API proposed by this PEP (the 1.1 versioned base URL),
+successful responses MUST have the ``Content-Type`` header set to ``application/json``.
+Where possible, responses for error status codes should also have the
+``Content-Type`` header set to ``application/json`` and have a body in the
+following format:
+
+.. code-block:: json
+
+    {
+    "message": "<message>",
+    }
+
+where ``<message>`` describes the error that has occurred.
+
+
+TUF Support - PEP 458
+---------------------
+
+TUF support as proposed by :pep:`458` would function on the individual versioned base URLs
+in the same manner as it is proposed for the current :pep:`503` API.
+
+
+
+Recommendations
+===============
+
+FAQ
+===
+
+Does this mean PyPI is planning to drop support for HTML/PEP 503?
+-----------------------------------------------------------------
+
+No, PyPI has no plans at this time to drop support for :pep:`503` or HTML
+responses, although other repositories may do so at their discretion. 
+
+The existing HTML responses incur almost no maintenance burden on PyPI and
+there is no pressing need to remove them. The only real benefit to dropping them
+would be to reduce the number of items cached in their CDN.
+
+If in the future PyPI *does* wish to drop support for them, doing so would
+almost certainly be the topic of a PEP, or at a minimum a public, open, discussion
+and would be informed by metrics showing any impact to end users.
+
+
+Why JSON instead of X format?
+-----------------------------
+
+JSON parsers are widely available in most, if not every, language. A JSON
+parser is also available in the Python standard library. It's not the perfect
+format, but it's good enough.
+
+
+Why not add X feature?
+----------------------
+
+The general goal of this PEP is to change or add very little. We will instead focus
+largely on translating the existing information contained within our HTML responses
+into a sensible JSON representation. This will include :pep:`658` metadata required
+for packaging tooling.
+
+The only real new capability that is added in this PEP is the ability to have
+multiple hashes for a single file. That was done because the current mechanism being
+limited to a single hash has made it painful in the past to migrate hashes
+(md5 to sha256) and the cost of making the hashes a dictionary and allowing multiple
+is pretty low.
+
+The API was generally designed to allow further extension through adding new keys,
+so if there's some new piece of data that an installer might need, future PEPs can
+easily make that available.
+
+
+Why is the versioned base URL a dictionary instead of a list?
+---------------------------------------------------
+
+The most natural direct translation of the versioned base URL being a list of links is to turn
+it into a list of objects. However, stepping back, that's not the most natural way
+to actually represent this data. This was a result of a HTML limitation that we had to
+work around. With a list (either of ``<a>`` tags, or objects) there's nothing stopping
+you from listing the same project twice and other unwanted patterns.
+
+A dictionary also allows for an average of constant-time access given the project name.
+
+
+Why include the filename when the URL has it already?
+-----------------------------------------------------
+
+We could reduce the size of our responses by removing the ``filename`` key and expecting
+clients to pull that information out of the URL.
+
+Currently this PEP chooses not to do that, largely because :pep:`503` explicitly required
+that the filename be available via the anchor tag of the links, though that was largely
+because *something* had to be there. It's not clear if repositories in the wild always
+have a filename as the last part of the URL or if they're relying on the filename in the
+anchor tag.
+
+It also makes the responses slightly nicer to read for a human, as you get a nice short
+unique identifier.
+
+If we got reasonable confidence that mandating the filename is in the URL, then we could
+drop this data and reduce the size of the JSON response.
+
+
+Why not break out other pieces of information from the filename?
+----------------------------------------------------------------
+
+Currently clients are expected to parse a number of pieces of information from the
+filename such as project name, version, ABI tags, etc. We could break these out
+and add them as keys to the file object.
+
+This PEP has chosen not to do that because doing so would increase the size of the
+API responses, and most clients are going to require the ability to parse that
+information out of file names anyways regardless of what the API does. Thus it makes
+sense to keep that functionality inside of the clients.
+
+
+Why not use Content Negotiation?
+-------------------------------------------------
+
+A forerunner to this PEP (:pep:`691`) proposed just that.
+However, it has several drawbacks:
+
+* Repositories need to be backed by a server which supports content negotiation.
+  This is possible with Apache's ``mod_negotiation``, but not for services like GitHub Pages.
+  This means static repositories would be stuck with the HTML-based :pep:`503` API,
+  requiring clients to keep supporting that API as well. 
+
+
+
+                                              
+
+Does this mean that static servers are no longer supported?
+-----------------------------------------------------------
+
+In short, no, static servers are still (almost) fully supported by this PEP.
+
+The specifics of how they are supported will depend on the static server in
+question. For example:
+
+- **S3:** S3 fully supports custom content types, however it does not support
+  any form of content negotiation. In order to have a server hosted on S3, you
+  would have to use the "Endpoint configuration" style of negotiation, and
+  users would have to configure their clients explicitly.
+- **Github Pages:** Github pages does not support custom content types, so the
+  S3 solution is not currently workable, which means that only ``text/html``
+  repositories would function.
+- **Apache:** Apache fully supports server-driven content negotiation, and would
+  just need to be configured to map the custom content types to specific extension.
+
+
+
+Why not add an ``application/json`` alias like ``text/html``?
+-------------------------------------------------------------
+
+This PEP believes that it is best for both clients and servers to be explicit
+about the types of the API responses that are being used, and a content type
+like ``application/json`` is the exact opposite of explicit.
+
+The existence of the ``text/html`` alias exists as a compromise primarily to
+ensure that existing consumers of the API continue to function as they already
+do. There is no such expectation of existing clients using the Simple API with
+a ``application/json`` content type.
+
+In addition, ``application/json`` has no versioning in it, which means that
+if there is ever a ``2.0`` version of the Simple API, we will be forced to make
+a decision. Should ``application/json`` preserve backwards compatibility and
+continue to be an alias for ``application/vnd.pypi.simple.v1+json``, or should
+it be updated to be an alias for ``application/vnd.pypi.simple.v2+json``?
+
+This problem doesn't exist for ``text/html``, because the assumption is that
+HTML will remain a legacy format, and will likely not gain *any* new features,
+much less features that require breaking compatability. So having it be an
+alias for ``application/vnd.pypi.simple.v1+html`` is effectively the same as
+having it be an alias for ``application/vnd.pypi.simple.latest+html``, since
+``1.0`` will likely be the only HTML version to exist.
+
+The largest benefit to adding the ``application/json`` content type is that
+there do things that do not allow you to have custom content types, and require
+you to select one of their preset content types. The main example of this being
+Github Pages, which the lack of ``application/json`` support in this PEP means
+that static repositories will no longer be able to be hosted on Github Pages
+unless GitHub adds the ``application/vnd.pypi.simple.v1+json`` content type.
+
+This PEP believes that the benefits are not large enough to add that content
+type alias at this time, and that it's inclusion would likely be a footgun
+waiting for unsuspecting people to accidentally pick it up. Especially given
+that we can always add it in the future, but removing things is a lot harder
+to do.
+
+
+Appendix 1: Survey of use cases to cover
+========================================
+
+This was done through a discussion between ``pip``, ``PyPI``, and ``bandersnarch``
+maintainers, who are the two first potential users for the new API. This is
+how they use the Simple + JSON APIs today:
+
+- ``pip``:
+
+  - List of all files for a particular release
+  - Metadata of each individual artifact:
+
+    - was it yanked? (`data-yanked`)
+    - what's the python-requires? (`data-python-requires`)
+    - what's the hash of this file? (currently, hash in URL)
+    - Full metadata (`data-dist-info-metadata`)
+    - [Bonus] what are the declared dependencies, if available (list-of-strings, null if unavailable)?
+
+- ``bandersnatch`` - Only uses legacy JSON API + XMLRPC today:
+
+  - Generates Simple HTML rather than copying from PyPI
+
+    - Maybe this changes with the new API and we verbatim pull these API assets from PyPI
+
+  - List of all files for a particular release.
+
+    - Workout URL for release files to download
+
+  - Metadata of each individual artifact.
+
+    - Write out the JSON to mirror storage today (disk/S3)
+
+      - Required metadata used (via Package class - https://github.com/pypa/bandersnatch/blob/main/src/bandersnatch/package.py):
+
+        - metadata["info"]
+        - metadata["last_serial"]
+        - metadata["releases"]
+
+          - digests
+          - URL
+
+  - XML-RPC calls (we'd love to deprecate - but we don't think should go in the Simple API)
+
+    - [Bonus] Get packages since serial X (or all)
+
+      - XML-RPC Call: ``changelog_since_serial``
+
+    - [Bonus] Get all packages with serial
+
+      - XML-RPC Call: ``list_packages_with_serial``
+
+
+Copyright
+=========
+
+This document is placed in the public domain or under the
+CC0-1.0-Universal license, whichever is more permissive.
